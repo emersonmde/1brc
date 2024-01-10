@@ -105,7 +105,7 @@ The [Show & Tell](https://github.com/gunnarmorling/1brc/discussions/categories/s
 This repository contains two programs:
 
 * `dev.morling.onebrc.CreateMeasurements` (invoked via _create\_measurements.sh_): Creates the file _measurements.txt_ in the root directory of this project with a configurable number of random measurement values
-* `dev.morling.onebrc.CalculateAverage` (invoked via _calculate\_average\_baseline.sh_): Calculates the average values for the file _measurements.txt_
+* `dev.morling.onebrc.CalculateAverage_emersonmde` (invoked via _calculate\_average\_baseline.sh_): Calculates the average values for the file _measurements.txt_
 
 Execute the following steps to run the challenge:
 
