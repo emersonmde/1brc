@@ -20,21 +20,20 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
-import java.nio.charset.StandardCharsets;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.*;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 
-public class CalculateAverage_emersonmde {
+public class CalculateAverage_emersonmde_old {
 
     private static final String FILE = "./measurements.txt";
     private static final long CHUNK_SIZE = 100 * 1024 * 1024; // 100MB chunk size, adjust as needed
 
     private static final Logger LOGGER = Logger.getLogger(
-            CalculateAverage_emersonmde.class.getName());
+            CalculateAverage_emersonmde_old.class.getName());
 
     public static void main(String[] args) {
         try (RandomAccessFile file = new RandomAccessFile(FILE, "r");
@@ -110,41 +109,6 @@ public class CalculateAverage_emersonmde {
             processLine(line.toString(), results);
         }
     }
-    private static void processChunk(FileChannel fileChannel, long position, long chunkSize)
-            throws IOException {
-        MappedByteBuffer buffer = fileChannel.map(FileChannel.MapMode.READ_ONLY, position, chunkSize);
-
-        processBuffer(buffer);
-    }
-
-    public static List<Optional<?>> processBuffer(MappedByteBuffer buffer) {
-        String content = StandardCharsets.UTF_8.decode(buffer).toString();
-        try (Stream<String> lines = content.lines()) {
-            return lines.map(line -> {
-                        int separatorIndex = line.indexOf(";");
-                        if (separatorIndex == -1) {
-                            return Optional.empty();
-                        }
-
-                        String station = line.substring(0, separatorIndex);
-                        String valueString = line.substring(separatorIndex + 1);
-                        if (valueString.isEmpty() || valueString.equals("-")) {
-                            return Optional.empty();
-                        }
-                        try {
-                            double value = Double.parseDouble(valueString);
-                            return Optional.of(new AbstractMap.SimpleImmutableEntry<>(station, value));
-                        } catch (NumberFormatException e) {
-                            return Optional.empty();
-                        }
-                    })
-                    .filter(Optional::isPresent)
-                    .collect(Collectors.toList());
-        }
-    }
-
-
-
 
     // Parse a double from a string in the most efficent way possible
     private static double parseDouble(String s) {
