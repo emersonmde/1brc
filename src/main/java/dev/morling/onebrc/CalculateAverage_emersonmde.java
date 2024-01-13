@@ -15,21 +15,30 @@
  */
 package dev.morling.onebrc;
 
+import jdk.incubator.vector.DoubleVector;
+import jdk.incubator.vector.VectorOperators;
+import jdk.incubator.vector.VectorSpecies;
+
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
-import java.nio.charset.StandardCharsets;
-import java.util.*;
-import java.util.concurrent.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
-
+import java.util.stream.IntStream;
 
 public class CalculateAverage_emersonmde {
 
+    private static final VectorSpecies<Double> SPECIES = DoubleVector.SPECIES_PREFERRED;
     private static final String FILE = "./measurements.txt";
     private static final long CHUNK_SIZE = 100 * 1024 * 1024; // 100MB chunk size, adjust as needed
 
@@ -42,17 +51,15 @@ public class CalculateAverage_emersonmde {
 
             long fileSize = fileChannel.size();
             long position = 0;
-            ConcurrentHashMap<String, MeasurementAggregator> results = new ConcurrentHashMap<>();
-            int processors = Runtime.getRuntime().availableProcessors();
-            ExecutorService executor = Executors.newFixedThreadPool(processors);
-            List<Future<?>> futures = new ArrayList<>();
+            ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+            ArrayList<Future<Map<String, StationMetrics>>> futures = new ArrayList<>();
 
             while (position < fileSize) {
                 final long chunkSize = Math.min(CHUNK_SIZE, fileSize - position);
                 final long finalPosition = position;
-                Future<?> future = executor.submit(() -> {
+                Future<Map<String, StationMetrics>> future = executor.submit(() -> {
                     try {
-                        processChunk(fileChannel, finalPosition, chunkSize, results);
+                        return processChunk(fileChannel, finalPosition, chunkSize);
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     }
@@ -63,25 +70,21 @@ public class CalculateAverage_emersonmde {
                 position = adjustToLineEnd(file, position, fileSize);
             }
 
-            // Wait for all tasks to complete
-            for (Future<?> future : futures) {
-                future.get();
+            // Merge results from each thread
+            Map<String, StationMetrics> results = new HashMap<>();
+            for (var future : futures) {
+                mergeResults(results, future.get());
             }
-            executor.shutdown();
 
-            String resultString = results.entrySet().parallelStream()
-                    .map(entry -> {
-                        String station = entry.getKey();
-                        MeasurementAggregator aggregator = entry.getValue();
-                        double mean = aggregator.sum / aggregator.count;
-                        return String.format("%s=%.1f/%.1f/%.1f", station, aggregator.min, mean, aggregator.max);
-                    })
+            String resultString = results.values().parallelStream()
+                    .map(StationMetrics::toString)
                     .collect(Collectors.joining(", ", "{", "}"));
 
             System.out.println(resultString);
-        } catch (
 
-                FileNotFoundException e) {
+            executor.shutdown();
+            executor.close();
+        } catch (FileNotFoundException e) {
             LOGGER.severe(STR."File not found: \{e.getMessage()}");
             throw new RuntimeException(e);
         } catch (IOException | InterruptedException |
@@ -91,130 +94,146 @@ public class CalculateAverage_emersonmde {
         }
     }
 
-    private static void processChunk(FileChannel fileChannel, long position, long chunkSize,
-                                     ConcurrentHashMap<String, MeasurementAggregator> results)
+    // Use Convert values to Vector and use Vector API reduce lanes to calculate
+    // min, max, sum, and count
+    private static StationMetrics calculateResults(String station, double[] values, StationMetrics previousStationMetrics) {
+        double min = Double.POSITIVE_INFINITY;
+        double max = Double.NEGATIVE_INFINITY;
+        double sum = 0;
+        int count = values.length;
+
+        int i = 0;
+        for (; i < values.length - SPECIES.length(); i += SPECIES.length()) {
+            DoubleVector vector = DoubleVector.fromArray(SPECIES, values, i);
+            min = Math.min(min, vector.reduceLanes(VectorOperators.MIN));
+            max = Math.max(max, vector.reduceLanes(VectorOperators.MAX));
+            sum += vector.reduceLanes(VectorOperators.ADD);
+        }
+
+        // Handle remaining elements
+        for (; i < values.length; i++) {
+            min = Math.min(min, values[i]);
+            max = Math.max(max, values[i]);
+            sum += values[i];
+        }
+
+        if (previousStationMetrics != null) {
+            min = Math.min(min, previousStationMetrics.min);
+            max = Math.max(max, previousStationMetrics.max);
+            sum += previousStationMetrics.sum;
+            count += previousStationMetrics.count;
+        }
+
+        double mean = count > 0 ? sum / count : 0;
+        return new StationMetrics(station, min, mean, max, sum, count);
+    }
+
+    private static void mergeResults(Map<String, StationMetrics> lhs, Map<String, StationMetrics> rhs) {
+        for (Map.Entry<String, StationMetrics> rhsEntry : rhs.entrySet()) {
+            String rhsStation = rhsEntry.getKey();
+            StationMetrics rhsMetrics = rhsEntry.getValue();
+            lhs.compute(
+                    rhsStation,
+                    (_, lhsMetrics) -> {
+                        if (lhsMetrics == null) {
+                            return rhsMetrics;
+                        }
+                        return new StationMetrics(
+                                rhsStation,
+                                Math.min(lhsMetrics.min, rhsMetrics.min),
+                                (lhsMetrics.sum + rhsMetrics.sum) / (lhsMetrics.count + rhsMetrics.count),
+                                Math.max(lhsMetrics.max, rhsMetrics.max),
+                                lhsMetrics.sum + rhsMetrics.sum,
+                                lhsMetrics.count + rhsMetrics.count);
+                    });
+        }
+    }
+
+    private static Map<String, StationMetrics> processChunk(FileChannel fileChannel, long position, long chunkSize)
             throws IOException {
         MappedByteBuffer buffer = fileChannel.map(FileChannel.MapMode.READ_ONLY, position, chunkSize);
+
+        double[] values = new double[SPECIES.length()];
+        int valuesIndex = 0;
+        Map<String, StationMetrics> results = new HashMap<>();
+        // StationMetrics previousStationMetrics = null;
 
         StringBuilder line = new StringBuilder();
         while (buffer.hasRemaining()) {
             char c = (char) buffer.get();
             if (c == '\n') {
-                processLine(line.toString(), results);
+                int separatorIndex = line.indexOf(";");
+
+                if (separatorIndex == -1) {
+                    continue;
+                }
+
+                String station = line.substring(0, separatorIndex);
+                String valueString = line.substring(separatorIndex + 1);
+                if (valueString.isEmpty() || valueString.equals("-")) {
+                    continue;
+                }
+
+                try {
+                    values[valuesIndex++] = Double.parseDouble(valueString);
+                }
+                catch (NumberFormatException e) {
+                    continue;
+                }
+
+                if (valuesIndex > values.length - 1) {
+                    results.put(station, calculateResults(station, values, results.get(station)));
+
+                    values = new double[SPECIES.length()];
+                    valuesIndex = 0;
+                }
                 line.setLength(0);
-            } else {
+            }
+            else {
                 line.append(c);
             }
         }
         if (!line.isEmpty()) {
-            processLine(line.toString(), results);
-        }
-    }
-    private static void processChunk(FileChannel fileChannel, long position, long chunkSize)
-            throws IOException {
-        MappedByteBuffer buffer = fileChannel.map(FileChannel.MapMode.READ_ONLY, position, chunkSize);
+            int separatorIndex = line.indexOf(";");
 
-        processBuffer(buffer);
-    }
-
-    public static List<Optional<?>> processBuffer(MappedByteBuffer buffer) {
-        String content = StandardCharsets.UTF_8.decode(buffer).toString();
-        try (Stream<String> lines = content.lines()) {
-            return lines.map(line -> {
-                        int separatorIndex = line.indexOf(";");
-                        if (separatorIndex == -1) {
-                            return Optional.empty();
-                        }
-
-                        String station = line.substring(0, separatorIndex);
-                        String valueString = line.substring(separatorIndex + 1);
-                        if (valueString.isEmpty() || valueString.equals("-")) {
-                            return Optional.empty();
-                        }
-                        try {
-                            double value = Double.parseDouble(valueString);
-                            return Optional.of(new AbstractMap.SimpleImmutableEntry<>(station, value));
-                        } catch (NumberFormatException e) {
-                            return Optional.empty();
-                        }
-                    })
-                    .filter(Optional::isPresent)
-                    .collect(Collectors.toList());
-        }
-    }
-
-
-
-
-    // Parse a double from a string in the most efficent way possible
-    private static double parseDouble(String s) {
-        if (s == null || s.isEmpty()) {
-            throw new NumberFormatException("Empty or null string");
-        }
-
-        double result = 0;
-        double fractionalDivisor = 1;
-        boolean negative = false;
-        boolean fractionalPart = false;
-
-        // Handle negative numbers
-        int startIndex = s.charAt(0) == '-' ? 1 : 0;
-        if (startIndex == 1) {
-            negative = true;
-        }
-
-        for (int i = startIndex; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (c == '.') {
-                if (fractionalPart) {
-                    throw new NumberFormatException("More than one decimal point found in input string: " + s);
-                }
-                fractionalPart = true;
-            } else {
-                int digit = c - '0';
-                if (digit < 0 || digit > 9) {
-                    throw new NumberFormatException("Invalid character encountered: " + c);
-                }
-                if (fractionalPart) {
-                    fractionalDivisor *= 10;
-                    result += digit / fractionalDivisor;
-                } else {
-                    result = result * 10 + digit;
-                }
+            if (separatorIndex == -1) {
+                return results;
             }
+
+            String station = line.substring(0, separatorIndex);
+            String valueString = line.substring(separatorIndex + 1);
+            if (valueString.isEmpty() || valueString.equals("-")) {
+                return results;
+            }
+
+            try {
+                values[valuesIndex] = Double.parseDouble(valueString);
+            }
+            catch (NumberFormatException e) {
+                return results;
+            }
+
+            results.put(station, calculateResults(station, values, results.get(station)));
         }
 
-        return negative ? -result : result;
+        return results;
     }
 
-    // TODO:
-    // - Look into vectorization
-    // - Look into Compiler directives
-    // - Look into Unsafe
-    // - Look into AOT
-    private static void processLine(
-            String line, ConcurrentHashMap<String, MeasurementAggregator> results) {
+    private static TemperatureRecord processLine(String line) {
         int separatorIndex = line.indexOf(';');
+
         if (separatorIndex == -1) {
-            return;
+            return null;
         }
 
         String station = line.substring(0, separatorIndex);
         String valueString = line.substring(separatorIndex + 1);
         if (valueString.isEmpty() || valueString.equals("-")) {
-            return;
+            return null;
         }
         double value = Double.parseDouble(valueString);
 
-        results.compute(
-                station,
-                (_, v) -> {
-                    if (v == null) {
-                        v = new MeasurementAggregator();
-                    }
-                    v.add(value);
-                    return v;
-                });
+        return new TemperatureRecord(station, value);
     }
 
     private static long adjustToLineEnd(RandomAccessFile file, long position, long ignoredFileSize)
@@ -239,5 +258,63 @@ public class CalculateAverage_emersonmde {
             sum += value;
             count++;
         }
+    }
+
+    private static class Result {
+        String station;
+        double min;
+        double mean;
+        double max;
+    }
+
+    private static class List<Double> {
+        private int size = 0;
+        private int capacity = 4096;
+        private double[] data = new double[capacity];
+
+        public void add(double value) {
+            if (size == capacity) {
+                capacity *= 2;
+                double[] newData = new double[capacity];
+                System.arraycopy(data, 0, newData, 0, size);
+                data = newData;
+            }
+            data[size++] = value;
+        }
+
+        public double get(int index) {
+            return data[index];
+        }
+
+        public int size() {
+            return size;
+        }
+
+        // Allocate a new array and copy the values from the old array into the new array
+        public void addAll(List<Double> values) {
+            int newSize = size + values.size;
+            if (newSize > capacity) {
+                capacity = newSize;
+                double[] newData = new double[capacity];
+                System.arraycopy(data, 0, newData, 0, size);
+                data = newData;
+            }
+            System.arraycopy(values.data, 0, data, size, values.size);
+            size = newSize;
+        }
+
+        public double[] getData() {
+            return data;
+        }
+    }
+
+    public record StationMetrics(String station, double min, double mean, double max, double sum, int count) {
+
+        public String toString() {
+            return String.format("%s=%.1f/%.1f/%.1f", station, min, mean, max);
+        }
+    }
+
+    public record TemperatureRecord(String station, double temperature) {
     }
 }
