@@ -26,13 +26,13 @@ import java.util.concurrent.*;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
-public class CalculateAverage_emersonmde_old {
+public class CalculateAverage_emersonmde_first {
 
     private static final String FILE = "./measurements.txt";
     private static final long CHUNK_SIZE = 100 * 1024 * 1024; // 100MB chunk size, adjust as needed
 
     private static final Logger LOGGER = Logger.getLogger(
-            CalculateAverage_emersonmde_old.class.getName());
+            CalculateAverage_emersonmde_first.class.getName());
 
     public static void main(String[] args) {
         try (RandomAccessFile file = new RandomAccessFile(FILE, "r");

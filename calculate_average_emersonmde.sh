@@ -32,7 +32,7 @@ determine_optimal_settings() {
   MAX_HEAP_SIZE=$(echo "scale=0; ($total_memory * .95) / 1" | bc)M
   MIN_HEAP_SIZE=$MAX_HEAP_SIZE
 
-  JAVA_OPTS="--enable-preview -Xms$MIN_HEAP_SIZE -Xmx$MAX_HEAP_SIZE $GC_TYPE --add-modules jdk.incubator.vector"
+  JAVA_OPTS="--enable-preview -Xms$MIN_HEAP_SIZE -Xmx$MAX_HEAP_SIZE $GC_TYPE"
 }
 
 get_system_info

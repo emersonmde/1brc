@@ -20,4 +20,4 @@ source "$HOME/.sdkman/bin/sdkman-init.sh"
 sdk use java 21.0.1-graal 1>&2
 #native-image --pgo-instrument --enable-preview --no-fallback -march=native -cp target/average-1.0.0-SNAPSHOT.jar -o image_calculateaverage_emersonmde dev.morling.onebrc.CalculateAverage_emersonmde
 #./calculate_average_emersonmde.sh
-native-image -O3 --strict-image-heap --enable-preview --no-fallback -march=native --add-modules jdk.incubator.vector -cp target/average-1.0.0-SNAPSHOT.jar -o image_calculateaverage_emersonmde dev.morling.onebrc.CalculateAverage_emersonmde
+native-image -O3 --strict-image-heap --enable-preview --no-fallback -march=native -cp target/average-1.0.0-SNAPSHOT.jar -o image_calculateaverage_emersonmde dev.morling.onebrc.CalculateAverage_emersonmde
