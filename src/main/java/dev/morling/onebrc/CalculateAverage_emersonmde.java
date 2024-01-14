@@ -24,9 +24,13 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 public class CalculateAverage_emersonmde {
 
@@ -42,42 +46,34 @@ public class CalculateAverage_emersonmde {
 
             long fileSize = fileChannel.size();
             int processors = Runtime.getRuntime().availableProcessors();
-            ExecutorService executor = Executors.newFixedThreadPool(processors);
+            ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
             List<Future<Map<String, MeasurementAggregator>>> futures = new ArrayList<>();
 
             // Calculate segment size and adjust for line boundaries
             long segmentSize = fileSize / processors;
-            for (int i = 0; i < processors; i++) {
+            String resultString = IntStream.range(0, processors + 2).parallel().mapToObj(i -> {
                 final long start = i * segmentSize;
-                final long end = (i < processors - 1) ? adjustToLineEnd(file, (i + 1) * segmentSize, fileSize) : fileSize;
+                final long end;
+                try {
+                    end = (i < processors - 1) ? adjustToLineEnd(file, (i + 1) * segmentSize, fileSize) : fileSize;
+                }
+                catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
 
                 // Submit a task to process each file segment
-                Future<Map<String, MeasurementAggregator>> future = executor.submit(() -> {
-                    Map<String, MeasurementAggregator> results = new HashMap<>();
-                    try {
-                        processChunk(fileChannel, start, end - start, results);
-                    }
-                    catch (IOException e) {
-                        throw new RuntimeException(e);
-                    }
-                    return results;
-                });
-                futures.add(future);
-            }
-
-            String resultString = futures.parallelStream()
-                    .map(future -> {
-                        try {
-                            return future.get();
-                        }
-                        catch (InterruptedException | ExecutionException e) {
-                            throw new RuntimeException(e);
-                        }
-                    })
-                    .reduce(new ConcurrentHashMap<>(), (finalResults, individualResult) -> {
-                        mergeHashMaps(finalResults, individualResult);
-                        return finalResults;
-                    })
+                Map<String, MeasurementAggregator> results = new HashMap<>();
+                try {
+                    processChunk(fileChannel, start, end - start, results);
+                }
+                catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+                return results;
+            }).reduce(new ConcurrentHashMap<>(), (finalResults, individualResult) -> {
+                mergeHashMaps(finalResults, individualResult);
+                return finalResults;
+            })
                     .entrySet().parallelStream()
                     .map(entry -> {
                         String station = entry.getKey();
@@ -86,7 +82,6 @@ public class CalculateAverage_emersonmde {
                         return String.format("%s=%.2f/%.2f/%.2f", station, aggregator.min, mean, aggregator.max);
                     })
                     .collect(Collectors.joining(", "));
-
             System.out.println(resultString);
             executor.shutdown();
         }
